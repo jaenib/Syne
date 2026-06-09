@@ -45,14 +45,20 @@ def render_gif(
     size: int = 460,
     supersample: int = 2,
     background: tuple[int, int, int] = (4, 5, 13),
-    decay: float | None = None,
-    exposure: float = 3.2,
-    bloom: float = 0.6,
+    tail: int = 1000,
+    exposure: float = 1.1,
+    bloom: float = 0.45,
+    flash_gain: float = 0.9,
+    zoom_gain: float = 0.12,
+    **_legacy,
 ) -> str:
-    """Render one or several Lorenz trajectories to a long-exposure GIF.
+    """Render one or several Lorenz trajectories to a reactive GIF.
 
-    Multiple trajectories (e.g. one per frequency band) are composited into the
-    same color-preserving buffers, so overlapping wings blend their hues.
+    Each frame **redraws the recent tail** at the current camera angle (so the
+    butterfly stays clean while it tumbles in 3-D, instead of smearing). The
+    tail fades from head to tip; onsets drive a sharp **pulse** that brightens
+    the head, flashes the frame, and punches the zoom — so beats are
+    unmistakable while the attractor shape stays legible.
     """
     from PIL import Image, ImageChops, ImageFilter
 
@@ -62,50 +68,45 @@ def render_gif(
     bg = np.asarray(background, dtype=np.float32)
     bg_head = 255.0 - bg
 
-    if decay is None:
-        decay = float(np.clip(0.985 + 0.011 * trajs[0].fade, 0.985, 0.996))
-
-    luts = [_hue_to_rgb(t.hue, t.sat) for t in trajs]   # per-point vivid colors
-
-    # one (color, density) buffer pair PER curve, so curves keep their own hue;
-    # they are combined by lighten (max) at output time — averaging different
-    # hues into a shared buffer would grey out the overlap region.
-    cols = [np.zeros((ss, ss, 3), dtype=np.float32) for _ in trajs]
-    dens = [np.zeros((ss, ss), dtype=np.float32) for _ in trajs]
+    luts = [_hue_to_rgb(t.hue, t.sat) for t in trajs]
+    have_fx = trajs[0].frame_angle.size == n_video
     half = ss / 2.0
     base_scale = (ss * 0.40) / _SPAN
     blur_radius = ss * 0.0065
+    nb = len(trajs)
 
     frames = []
-    prev_end = [0] * len(trajs)
-    nb = len(trajs)
     for f in range(n_video):
-        for ti, t in enumerate(trajs):
-            cols[ti] *= decay
-            dens[ti] *= decay
-            end = int(t.frame_end[f])
-            lo = max(0, prev_end[ti] - 1)
-            prev_end[ti] = end
-            if end - lo >= 2:
-                pts = t.points[lo:end]
-                glow = t.glow[lo:end]
-                cc = luts[ti][lo:end]
-                px, py = _project(pts, half, base_scale * t.scale)
-                depth = _depth_shade(pts)
-                inten = (0.35 + 0.75 * glow) * depth
-                inten[-6:] *= 2.0                      # hot (bright) head, same hue
-                _draw_curve(cols[ti], dens[ti], px, py, cc, inten, ss)
+        angle = float(trajs[0].frame_angle[f]) if have_fx else 0.0
+        pulse_g = max((float(t.frame_pulse[f]) for t in trajs
+                       if t.frame_pulse.size == n_video), default=0.0)
 
-        # occlusion compositing: each pixel takes the PURE color of the densest
-        # curve there (like depth ordering), so overlaps stay saturated instead
-        # of blending toward grey/white.
+        cols = [np.zeros((ss, ss, 3), dtype=np.float32) for _ in trajs]
+        dens = [np.zeros((ss, ss), dtype=np.float32) for _ in trajs]
+        for ti, t in enumerate(trajs):
+            end = int(t.frame_end[f])
+            lo = max(0, end - tail)
+            m = end - lo
+            if m < 2:
+                continue
+            pts = t.points[lo:end]
+            glow = t.glow[lo:end]
+            cc = luts[ti][lo:end]
+            px, py = _project(pts, half, base_scale * t.scale, angle)
+            depth = _depth_shade(pts, angle)
+            ramp = np.linspace(0.06, 1.0, m) ** 1.5          # head bright, tip dim
+            inten = ramp * (0.3 + 0.8 * glow) * depth
+            cp = float(t.frame_pulse[f]) if t.frame_pulse.size == n_video else 0.0
+            inten[-14:] *= (2.0 + 4.0 * cp)                  # head pops on its band's hit
+            _draw_curve(cols[ti], dens[ti], px, py, cc, inten, ss)
+
         if nb == 1:
             mean_col = cols[0] / np.maximum(dens[0][:, :, None], 1e-6)
             lum = 1.0 - np.exp(-dens[0] * exposure)
             rgb = bg + bg_head * mean_col * lum[:, :, None]
         else:
-            dstack = np.stack(dens)                    # (nb, ss, ss)
-            win = dstack.argmax(0)                      # densest curve per pixel
+            dstack = np.stack(dens)
+            win = dstack.argmax(0)
             wsel = win[None, :, :, None]
             mean_cols = np.stack([cols[i] / np.maximum(dens[i][:, :, None], 1e-6)
                                   for i in range(nb)])
@@ -113,15 +114,15 @@ def render_gif(
             win_den = np.take_along_axis(dstack, win[None], 0)[0]
             lum = 1.0 - np.exp(-win_den * exposure)
             rgb = bg + bg_head * win_col * lum[:, :, None]
+
+        rgb *= (1.0 + flash_gain * pulse_g)                  # beat brightness flash
         img = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8), "RGB")
 
         if bloom > 0:
             halo = img.filter(ImageFilter.GaussianBlur(blur_radius))
             halo = halo.point(lambda v: int(v * bloom))
             img = ImageChops.add(img, halo)
-        if supersample != 1:
-            img = img.resize((size, size), Image.LANCZOS)
-        frames.append(img)
+        frames.append(_resize_zoom(img, size, 1.0 + zoom_gain * pulse_g))
 
     if not frames:
         frames = [Image.new("RGB", (size, size), tuple(background))]
@@ -138,17 +139,32 @@ def render_gif(
 
 
 # --------------------------------------------------------------------------- #
-def _project(pts: np.ndarray, half: float, scale: float):
+def _project(pts: np.ndarray, half: float, scale: float, angle: float = 0.0):
+    """Yaw about the vertical (z) axis by ``angle``, then orthographic project."""
     x, y, z = pts[:, 0], pts[:, 1], pts[:, 2]
+    if angle:
+        ca, sa = np.cos(angle), np.sin(angle)
+        x, y = x * ca - y * sa, x * sa + y * ca
     screen_x = x
     screen_y = -(z - _Z_CENTER) * 0.95 + y * 0.30
     return half + screen_x * scale, half + screen_y * scale
 
 
-def _depth_shade(pts: np.ndarray) -> np.ndarray:
-    y = pts[:, 1]
-    d = (y + 25.0) / 50.0
-    return np.clip(0.6 + 0.5 * d, 0.4, 1.2)
+def _depth_shade(pts: np.ndarray, angle: float = 0.0) -> np.ndarray:
+    x, y = pts[:, 0], pts[:, 1]
+    yr = x * np.sin(angle) + y * np.cos(angle) if angle else y
+    d = (yr + 25.0) / 50.0
+    return np.clip(0.55 + 0.6 * d, 0.35, 1.25)
+
+
+def _resize_zoom(img, size: int, zoom: float):
+    from PIL import Image
+    if zoom > 1.001:
+        w = img.width
+        cw = max(2, int(w / zoom))
+        off = (w - cw) // 2
+        img = img.crop((off, off, off + cw, off + cw))
+    return img.resize((size, size), Image.LANCZOS)
 
 
 def _draw_curve(col, den, px, py, cols, inten, size):

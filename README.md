@@ -175,10 +175,13 @@ moment blooms the large warm curve, a bright moment the small cool one.
 
 Use `--curves 1` for a single attractor, `--curves 3` (default) for bands.
 
-The GIF renderer uses a **long-exposure persistence buffer**: the whole
-attractor stays visible at all times and fades slowly, while a fast head keeps
-re-tracing it (so energy surges that widen the wings bloom the shape), finished
-with filmic tone-mapping and bloom over a supersampled buffer.
+**Reactivity.** Each frame redraws the recent trajectory **tail** at the current
+camera angle, so the butterfly stays a clean, legible shape while it tumbles in
+3-D (rather than smearing into a long-exposure cloud). Onsets drive a
+sharp-attack **pulse** that (a) darts the head forward, (b) flashes the whole
+frame brighter, and (c) punches the zoom — so beats are unmistakable. With
+`--curves 3` each band-curve reacts to **its own** band's onsets, so the bass
+curve punches on kicks and the treble curve on hats.
 
 ### Render
 
@@ -186,16 +189,26 @@ with filmic tone-mapping and bloom over a supersampled buffer.
 # audio -> animated GIF (analyze + map + integrate + rasterize)
 syne render track.wav -o track.lorenz.gif
 
-# tune the look: faster head, slower fade, bigger canvas, single curve
-syne render track.wav --speed 4 --decay 0.994 --size 600 --curves 1
+# tune the look: faster head, longer tail, bigger canvas, single attractor
+syne render track.wav --speed 4 --tail 1500 --size 600 --curves 1
 
 # export per-frame control JSON for the web viewer (no GIF)
 syne render track.wav --controls track.lorenz.json --no-gif
 ```
 
-Key knobs: `--speed` (head velocity), `--decay` (trail persistence, higher =
-slower fade; default derived from the track's dynamic range), `--substeps`
-(curve density), `--size`, `--fps`, `--seconds`.
+Key knobs: `--speed` (head velocity), `--tail` (how much of the butterfly is
+drawn), `--curves` (band curves), `--substeps` (curve density), `--size`,
+`--fps`, `--seconds`.
+
+### Testing reactivity offline
+
+Before going live, render a known track and measure how dynamic / beat-locked
+the output is (`tools/`):
+
+```bash
+python tools/make_test_audio.py /tmp/reactive.wav   # groove -> build -> drop -> outro
+python tools/capture.py /tmp/reactive.wav out.gif   # renders + prints motion / beat-lock metrics
+```
 
 ```python
 from syne.pipeline import analyze_file
@@ -227,7 +240,7 @@ syne/
   morph/drivers.py    # SemanticProfile -> generic renderer control channels
   render/
     lorenz.py         # connectors: tags -> Lorenz params, RK4 integrator, band curves
-    raster.py         # Trajectory(s) -> GIF (long-exposure, color-preserving, occlusion)
+    raster.py         # Trajectory(s) -> GIF (redraw-tail, 3-D rotation, pulse flash/zoom)
   cli.py              # `syne stream` / `syne analyze` / `syne render`
 web/                  # interactive, audio-synced WebGL viewer (Three.js)
 ```

@@ -91,6 +91,8 @@ class Trajectory:
     rotation_speed: float
     fade: float
     scale: float = 1.0               # relative size when compositing multiple curves
+    frame_pulse: np.ndarray = field(default_factory=lambda: np.zeros(0))   # (F,) beat punch
+    frame_angle: np.ndarray = field(default_factory=lambda: np.zeros(0))   # (F,) camera yaw (rad)
 
 
 # --------------------------------------------------------------------------- #
@@ -115,14 +117,15 @@ def build_control(profile: SemanticProfile) -> LorenzControl:
     base_dt = 0.05 * (tags.rhythm.tempo_bpm / 120.0)     # tempo sets traversal speed
     base_dt = float(np.clip(base_dt, 0.02, 0.12))
 
-    # --- per-frame modulation ----------------------------------------- #
-    rho = rho_base * (0.85 + 0.30 * energy) + 6.0 * flux         # energy widens, flux spikes
-    sigma = sigma_base * (0.90 + 0.20 * energy)
-    beta = beta_base * (0.95 + 0.10 * brightness)
-    speed = 0.6 + 0.9 * energy                                  # 0.6 .. 1.5
+    # --- per-frame modulation (wide ranges so the shape actually morphs) -- #
+    e2 = energy ** 1.4                                          # punchier (gamma) energy
+    rho = rho_base * (0.55 + 1.05 * e2) + 9.0 * onset           # energy widens, hits flare
+    sigma = sigma_base * (0.80 + 0.45 * energy)
+    beta = beta_base * (0.78 + 0.55 * brightness)               # real vertical movement
+    speed = 0.5 + 1.4 * e2                                      # 0.5 .. 1.9
     kick = onset
     jitter = flux
-    glow = 0.2 + 0.8 * energy
+    glow = 0.12 + 0.95 * e2
 
     # color: continuous hue from the FULL 12-D chroma (weighted circular mean
     # over the circle of fifths) so harmony — not just the loudest note —
@@ -131,9 +134,9 @@ def build_control(profile: SemanticProfile) -> LorenzControl:
     tint = (0.5 - tags.mood.valence) * 0.10                     # warm major / cool minor
     hue = (hue + tint) % 1.0
 
-    # saturation per frame from tonal clarity (peaky chroma = vivid; spread /
-    # noisy = washed), knocked down by a rough/noisy timbre.
-    sat = np.clip(0.30 + 0.85 * clarity - 0.25 * tags.timbre.roughness, 0.25, 1.0)
+    # saturation per frame from tonal clarity (peaky chroma = more vivid), with
+    # a high floor so even percussive / noisy passages stay colorful.
+    sat = np.clip(0.62 + 0.38 * clarity - 0.15 * tags.timbre.roughness, 0.5, 1.0)
 
     fade = float(np.clip(0.78 + 0.18 * tags.energy.dynamic_range, 0, 0.97))
     rotation_speed = float(np.clip((tags.rhythm.tempo_bpm - 40.0) / 160.0, 0.05, 1.0))
@@ -174,7 +177,7 @@ def build_control(profile: SemanticProfile) -> LorenzControl:
 
 
 def build_band_controls(
-    profile: SemanticProfile, *, hue_spread: float = 0.34
+    profile: SemanticProfile, *, hue_spread: float = 0.5
 ) -> list[LorenzControl]:
     """One :class:`LorenzControl` per frequency band (bass/mid/treble...).
 
@@ -211,8 +214,15 @@ def build_band_controls(
     controls = []
     for b in range(n_bands):
         be = arr[:, b]
-        rho_b = rho_base * (0.8 + 0.55 * be) + 5.0 * flux
-        glow_b = np.clip(0.10 + 0.95 * be, 0.0, 1.0)
+        # per-band onset: each curve punches on its OWN band's hits (bass kick,
+        # treble hats) instead of all sharing one global onset.
+        onset_b = np.clip(np.diff(be, prepend=be[:1]), 0.0, None)
+        mx = onset_b.max()
+        onset_b = onset_b / mx if mx > 0 else onset_b
+        e2 = be ** 1.4
+        rho_b = rho_base * (0.55 + 1.0 * e2) + 8.0 * onset_b
+        glow_b = np.clip(0.10 + 0.95 * e2, 0.0, 1.0)
+        speed_b = 0.5 + 1.3 * e2
         hue_b = (hue0 + offsets[b]) % 1.0
         beta_b = beta0 * beta_mul[b]
         controls.append(
@@ -220,7 +230,7 @@ def build_band_controls(
                 times=base.times, base_dt=base.base_dt,
                 rotation_speed=base.rotation_speed, fade=base.fade,
                 rho=_r(rho_b), sigma=base.sigma, beta=_r(beta_b),
-                speed=base.speed, kick=base.kick, jitter=base.jitter,
+                speed=_r(speed_b), kick=_r(onset_b), jitter=base.jitter,
                 glow=_r(glow_b), hue=_r(hue_b), sat=base.sat,
                 seeds=base.seeds, bindings=base.bindings,
             )
@@ -282,6 +292,16 @@ def integrate(
     speed, kick, jitter = rs(control.speed), rs(control.kick), rs(control.jitter)
     glow, hue, sat = rs(control.glow), rs(control.hue), rs(control.sat)
 
+    # reactive envelopes: a sharp-attack / fast-decay pulse on each onset (the
+    # core "punch"), and a steady camera yaw whose rate rises with tempo.
+    pulse = np.zeros(n_frames)
+    p = 0.0
+    for f in range(n_frames):
+        p = max(float(kick[f]), p * 0.80)
+        pulse[f] = p
+    ang_vel = 0.18 + 1.25 * control.rotation_speed             # rad/sec
+    angle = np.arange(n_frames) / fps * ang_vel
+
     rng = np.random.default_rng(seed)
     state = np.array([0.1, 0.0, 0.0])
     pts, hcol, scol, gcol, frame_end = [], [], [], [], []
@@ -294,7 +314,9 @@ def integrate(
             state = state + rng.standard_normal(3) * 0.35
             si += 1
 
-        dt = control.base_dt * max(speed[f], 0.05) * speed_scale / substeps
+        # head darts forward on a hit (pulse), so onsets are visible as motion
+        dt = control.base_dt * max(speed[f], 0.05) * (1.0 + 1.1 * pulse[f]) \
+            * speed_scale / substeps
         for _ in range(substeps):
             state = _rk4(state, sigma[f], rho[f], beta[f], dt)
             if jitter[f] > 0:
@@ -303,10 +325,6 @@ def integrate(
             hcol.append(hue[f])
             scol.append(sat[f])
             gcol.append(glow[f])
-
-        if kick[f] > 0.2:                          # visible jolt on onsets
-            state = state + rng.standard_normal(3) * kick[f] * 0.45
-
         frame_end.append(len(pts))
 
     return Trajectory(
@@ -318,6 +336,8 @@ def integrate(
         fps=fps,
         rotation_speed=control.rotation_speed,
         fade=control.fade,
+        frame_pulse=pulse,
+        frame_angle=angle,
     )
 
 

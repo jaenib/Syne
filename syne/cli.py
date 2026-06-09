@@ -98,7 +98,7 @@ def _cmd_render(args: argparse.Namespace) -> int:
                 control, fps=args.fps, substeps=args.substeps,
                 speed_scale=args.speed, max_seconds=args.seconds,
             )
-        render_gif(traj, out, size=args.size, decay=args.decay)
+        render_gif(traj, out, size=args.size, tail=args.tail)
         print(f"wrote animation       -> {out}", file=sys.stderr)
 
     if args.summary:
@@ -192,9 +192,9 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("--curves", type=int, default=3,
                         help="number of band curves to composite (1 = single, "
                         "default 3 = bass/mid/treble)")
-    render.add_argument("--decay", type=float, default=None,
-                        help="persistence per frame, 0..1 (higher = slower fade; "
-                        "default derived from the track's dynamic range)")
+    render.add_argument("--tail", type=int, default=1000,
+                        help="trajectory tail length redrawn per frame "
+                        "(longer = more of the butterfly visible; default 1000)")
     render.add_argument("--summary", action="store_true", help="print a summary")
     render.set_defaults(func=_cmd_render)
     return parser
