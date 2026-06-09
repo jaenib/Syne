@@ -17,7 +17,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0"]
+render = ["pillow>=10"]
+dev = ["pytest>=7.0", "pillow>=10"]
 
 [project.scripts]
 syne = "syne.cli:main"

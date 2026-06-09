@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Syne — Lorenz viewer</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #05060f; color: #cfd3e6;
+         font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  #wrap { position: fixed; inset: 0; }
+  canvas { display: block; width: 100%; height: 100%; }
+  #panel { position: fixed; top: 12px; left: 12px; max-width: 320px;
+           background: rgba(10,12,24,.72); border: 1px solid #1d2240;
+           border-radius: 10px; padding: 12px 14px; backdrop-filter: blur(6px); }
+  #panel h1 { font-size: 14px; margin: 0 0 8px; letter-spacing: .08em; }
+  #panel .row { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
+  #panel input[type=file] { font: inherit; color: inherit; max-width: 100%; }
+  #panel button { font: inherit; color: #cfd3e6; background: #1a1f3a;
+                  border: 1px solid #2a3160; border-radius: 6px; padding: 4px 10px;
+                  cursor: pointer; }
+  #panel button:hover { background: #242b54; }
+  #hud { margin-top: 8px; font-size: 11px; color: #8b91b4; white-space: pre-wrap; }
+  .hint { color: #6a708f; font-size: 11px; }
+  audio { width: 100%; margin-top: 8px; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="gl"></canvas></div>
+<div id="panel">
+  <h1>SYNE · LORENZ</h1>
+  <div class="row"><label>controls&nbsp;</label>
+    <input id="ctrlFile" type="file" accept="application/json,.json" /></div>
+  <div class="row"><label>audio&nbsp;&nbsp;&nbsp;&nbsp;</label>
+    <input id="audioFile" type="file" accept="audio/*" /></div>
+  <div class="row">
+    <button id="play">play ▶</button>
+    <button id="reset">reset</button>
+  </div>
+  <audio id="audio" controls></audio>
+  <div id="hud">load a *.lorenz.json (syne render --controls) and the matching
+audio file, then press play.</div>
+  <div class="hint">no audio? it still animates on a synthetic clock.</div>
+</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+} }
+</script>
+<script type="module" src="./lorenz.js"></script>
+</body>
+</html>

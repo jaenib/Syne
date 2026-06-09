@@ -24,7 +24,11 @@ htmlcov/
 # Generated outputs
 *.semantic.json
 *.drivers.json
+*.lorenz.json
+*.lorenz.gif
+*.gif
 !examples/*.json
+!docs/**/*.gif
 
 # Audio scratch
 audio/

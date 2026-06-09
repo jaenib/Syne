@@ -11,6 +11,11 @@ SAMAT trains models on large datasets, Syne ships a transparent DSP-heuristic
 tagger that runs offline out of the box — behind a pluggable interface so a
 learned model can drop in later.
 
+The included renderer maps those tags onto a **morphing Lorenz attractor** — the
+chaos "butterfly" — so the geometry breathes with the music:
+
+![Lorenz attractor morphing to music](docs/lorenz_demo.gif)
+
 ```
 audio file ──▶ load ──▶ feature groups ──▶ tagger ──▶ SemanticProfile ──▶ morph drivers ──▶ (renderer)
                          rhythm/tonal/         │            (JSON contract)        │
@@ -115,6 +120,63 @@ Each channel ships with a `bindings` note describing its intended geometric
 meaning. See
 [`examples/example_output.drivers.json`](examples/example_output.drivers.json).
 
+## Renderer — the Lorenz butterfly
+
+The Lorenz system
+
+```
+dx/dt = sigma * (y - x)
+dy/dt = x * (rho - z) - y
+dz/dt = x * y - beta * z
+```
+
+is a meaningful target because its parameters have well-understood effects on
+the curve, so the mapping isn't arbitrary. `syne/render/lorenz.py` owns the
+**connectors** (tags → Lorenz parameters); two renderers consume them — an
+offline GIF rasterizer (no GPU / ffmpeg) and an audio-synced
+[web viewer](web/).
+
+| connector | controls the curve | driven by | why |
+|---|---|---|---|
+| `rho` | wing size & chaos | arousal + energy (+ flux) | below ~24.74 the system spirals into fixed points (ordered); above it the chaotic wings grow with `rho` |
+| `sigma` | swirl tightness | danceability | sets how fast trajectories are pulled into the rotation |
+| `beta` | vertical pinch / wing separation | timbre brightness | geometric factor on the `z` axis |
+| `speed` | comet-head velocity | tempo (base) + energy | integration step per frame |
+| `kick` | impulse flutter | onset strength | jolts the state on attacks/beats |
+| `jitter` | surface agitation | spectral flux | per-step positional noise |
+| `glow` | line intensity | energy | brightness of the trail |
+| `hue` / `saturation` | color | key + chroma / valence | circle-of-fifths hue, valence saturation |
+| `seeds` | state re-seed | section boundaries | a visual "scene change" when structure changes |
+
+So a calm, sparse track yields an ordered, slow spiral; a loud, fast, dynamic
+track yields wide, fluttering, fast chaotic wings — and the shape morphs
+continuously as those qualities change through the piece.
+
+### Render
+
+```bash
+# audio -> animated GIF (analyze + map + integrate + rasterize)
+syne render track.wav -o track.lorenz.gif
+
+# export per-frame control JSON for the web viewer (no GIF)
+syne render track.wav --controls track.lorenz.json --no-gif
+```
+
+```python
+from syne.pipeline import analyze_file
+from syne.render.lorenz import build_control, integrate
+from syne.render.raster import render_gif
+
+profile = analyze_file("track.wav")
+control = build_control(profile)            # tags -> Lorenz connectors
+traj = integrate(control, fps=30)           # RK4 under time-varying control
+render_gif(traj, "track.lorenz.gif")
+```
+
+The [web viewer](web/) (`web/`) loads the control JSON + the audio and
+integrates the attractor live in the browser, synced to playback. Rendering
+needs the optional Pillow dependency: `pip install -e ".[render]"`.
+
 ## Architecture
 
 ```
@@ -131,9 +193,13 @@ syne/
     heuristic.py      # default DSP-heuristic tagger
     vocab.py          # interpretable label vocabularies + rules
   semantics/schema.py # SemanticProfile dataclasses = the JSON contract
-  morph/drivers.py    # SemanticProfile -> renderer control channels
+  morph/drivers.py    # SemanticProfile -> generic renderer control channels
+  render/
+    lorenz.py         # the connectors: tags -> Lorenz params + RK4 integrator
+    raster.py         # Trajectory -> animated GIF (Pillow, additive glow)
   pipeline.py         # orchestration: file -> SemanticProfile
-  cli.py              # `syne analyze`
+  cli.py              # `syne analyze` / `syne render`
+web/                  # interactive, audio-synced WebGL viewer (Three.js)
 ```
 
 ## Extending with a learned tagger
@@ -155,9 +221,11 @@ profile = analyze_clip(load_audio("track.wav"), tagger=MyModelTagger())
 
 ## Roadmap
 
-- [ ] Renderer consuming the morph drivers (the geometry layer).
+- [x] Renderer turning the semantic info into morphing geometry (Lorenz butterfly).
+- [x] Audio-synced interactive WebGL viewer.
 - [ ] Optional deep-learning tagger adapter (e.g. MTG-Jamendo tags).
 - [ ] Beat-synchronous timelines for tighter visual sync.
+- [ ] More attractors / geometry modes selectable per track.
 
 ## Tests
 

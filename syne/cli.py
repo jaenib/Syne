@@ -36,6 +36,42 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_render(args: argparse.Namespace) -> int:
+    from syne.pipeline import analyze_file
+    from syne.render.lorenz import build_control, integrate
+    from syne.render.raster import render_gif
+    from syne.semantics.schema import SemanticProfile
+
+    if args.from_profile:
+        profile = SemanticProfile.load(args.input)
+    else:
+        profile = analyze_file(args.input)
+
+    control = build_control(profile)
+
+    if args.controls:
+        control.save(args.controls)
+        print(f"wrote lorenz controls -> {args.controls}", file=sys.stderr)
+
+    out = args.output or _strip_ext(args.input) + ".lorenz.gif"
+    if not args.no_gif:
+        traj = integrate(control, fps=args.fps, max_seconds=args.seconds)
+        render_gif(traj, out, size=args.size, tail=args.tail)
+        print(f"wrote animation       -> {out}", file=sys.stderr)
+
+    if args.summary:
+        _print_summary(profile)
+    return 0
+
+
+def _strip_ext(path: str) -> str:
+    for ext in (".semantic.json", ".lorenz.json", ".json", ".wav", ".flac",
+                ".mp3", ".ogg", ".m4a"):
+        if path.endswith(ext):
+            return path[: -len(ext)]
+    return path
+
+
 def _suffix(args: argparse.Namespace, suffix: str) -> str:
     base = args.output or args.input
     for ext in (".semantic.json", ".json"):
@@ -82,6 +118,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     analyze.add_argument("--summary", action="store_true", help="print a summary")
     analyze.set_defaults(func=_cmd_analyze)
+
+    render = sub.add_parser(
+        "render", help="render a morphing Lorenz attractor from the music"
+    )
+    render.add_argument("input", help="audio file, or a .semantic.json with --from-profile")
+    render.add_argument("-o", "--output", help="output GIF path")
+    render.add_argument("--from-profile", action="store_true",
+                        help="treat INPUT as an existing semantic profile JSON")
+    render.add_argument("--controls", help="also export per-frame Lorenz control JSON "
+                        "(for the web viewer)")
+    render.add_argument("--no-gif", action="store_true",
+                        help="skip the GIF (useful with --controls)")
+    render.add_argument("--fps", type=int, default=30, help="frames per second (default 30)")
+    render.add_argument("--seconds", type=float, default=None,
+                        help="cap the rendered duration")
+    render.add_argument("--size", type=int, default=480, help="GIF size in px (default 480)")
+    render.add_argument("--tail", type=int, default=260,
+                        help="comet tail length in points (default 260)")
+    render.add_argument("--summary", action="store_true", help="print a summary")
+    render.set_defaults(func=_cmd_render)
     return parser
 
 
