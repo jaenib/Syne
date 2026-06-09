@@ -5,17 +5,17 @@ from __future__ import annotations
 import numpy as np
 
 from syne.pipeline import analyze_clip
-from syne.render.lorenz import build_control, integrate
+from syne.render.lorenz import build_band_trajectories, build_control, integrate
 
 
 def test_control_channels_aligned(synth_clip):
     profile = analyze_clip(synth_clip)
     c = build_control(profile)
     n = len(c.times)
-    for ch in (c.rho, c.sigma, c.beta, c.speed, c.kick, c.jitter, c.glow, c.hue):
+    for ch in (c.rho, c.sigma, c.beta, c.speed, c.kick, c.jitter, c.glow, c.hue, c.sat):
         assert len(ch) == n
     # every connector should be documented
-    for key in ("rho", "sigma", "beta", "speed", "kick", "jitter", "glow", "hue"):
+    for key in ("rho", "sigma", "beta", "speed", "kick", "jitter", "glow", "hue", "sat"):
         assert key in c.bindings
 
 
@@ -25,7 +25,7 @@ def test_parameters_in_meaningful_ranges(synth_clip):
     assert all(4.0 <= s <= 20.0 for s in c.sigma)
     assert all(1.5 <= b <= 4.0 for b in c.beta)
     assert all(0.0 <= h <= 1.0 for h in c.hue)
-    assert 0.0 <= c.saturation <= 1.0
+    assert all(0.0 <= s <= 1.0 for s in c.sat)
 
 
 def test_rho_tracks_energy():
@@ -53,6 +53,25 @@ def test_rho_tracks_energy():
     rho_hot = np.mean(build_control(profile2).rho)
 
     assert rho_hot > rho_calm + 5.0
+
+
+def test_band_timelines(synth_clip):
+    tl = analyze_clip(synth_clip).timelines
+    n = len(tl.times)
+    assert len(tl.bands) == n
+    assert all(len(frame) == 3 for frame in tl.bands)          # bass/mid/treble
+    assert all(0.0 <= v <= 1.0 for frame in tl.bands for v in frame)
+
+
+def test_band_trajectories(synth_clip):
+    profile = analyze_clip(synth_clip)
+    trajs = build_band_trajectories(profile, fps=20, substeps=4, max_seconds=3.0)
+    assert len(trajs) == 3                                      # one per band
+    scales = [t.scale for t in trajs]
+    assert len(set(round(s, 3) for s in scales)) == 3          # distinct sizes
+    for t in trajs:
+        assert np.all(np.isfinite(t.points))
+        assert t.hue.shape == t.sat.shape == (len(t.points),)
 
 
 def test_integrate_is_finite_and_bounded(synth_clip):

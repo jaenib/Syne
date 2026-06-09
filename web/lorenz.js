@@ -136,6 +136,7 @@ function step(dtReal) {
   const jitter = sample(control.jitter, t);
   const glow = sample(control.glow, t);
   const hue = sample(control.hue, t);
+  const sat = sample(control.sat, t);
 
   const dt = (control.base_dt * Math.max(speed, 0.05) * SPEED_SCALE) / SUBSTEPS;
   for (let i = 0; i < SUBSTEPS; i++) {
@@ -145,7 +146,7 @@ function step(dtReal) {
       state.y += (Math.random() - 0.5) * jitter * 0.24;
       state.z += (Math.random() - 0.5) * jitter * 0.24;
     }
-    trail.push({ x: state.x, y: state.y, z: state.z - Z_CENTER, h: hue, g: glow });
+    trail.push({ x: state.x, y: state.y, z: state.z - Z_CENTER, h: hue, g: glow, s: sat });
   }
   if (kick > 0.2) {
     state.x += (Math.random() - 0.5) * kick * 0.9;
@@ -154,14 +155,13 @@ function step(dtReal) {
   while (trail.length > TAIL) trail.shift();
 
   // upload trail to geometry, fading + coloring along the tail
-  const sat = control.saturation;
   const n = trail.length;
   for (let i = 0; i < n; i++) {
     const p = trail[i];
     positions[i * 3] = p.x; positions[i * 3 + 1] = p.z; positions[i * 3 + 2] = p.y;
     const fade = Math.pow((i + 1) / n, FADE_EXP);
     const v = fade * (0.35 + 0.75 * p.g);
-    const rgb = hsvToRgb(p.h % 1, sat, 1);
+    const rgb = hsvToRgb(p.h % 1, p.s, 1);
     colors[i * 3] = rgb[0] * v; colors[i * 3 + 1] = rgb[1] * v; colors[i * 3 + 2] = rgb[2] * v;
   }
   geom.setDrawRange(0, n);
@@ -170,7 +170,7 @@ function step(dtReal) {
   if (n > 0) {
     const p = trail[n - 1];
     head.position.set(p.x, p.z, p.y);
-    head.material.color.setRGB(...hsvToRgb(p.h % 1, sat * 0.3, 1));
+    head.material.color.setRGB(...hsvToRgb(p.h % 1, p.s * 0.4, 1));
   }
 
   rotation += control.rotation_speed * 0.35 * dtReal;

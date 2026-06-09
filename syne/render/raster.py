@@ -1,13 +1,16 @@
 """Offline rasterizer: a Lorenz :class:`Trajectory` -> animated GIF.
 
-Uses a **persistence (long-exposure) buffer**: every frame the accumulation is
-multiplied by a decay factor and the newly-integrated segment is splatted in
-additively. With a slow decay the whole butterfly stays visible at all times
-and fades gently, while a fast-travelling head keeps redrawing it — so energy
-surges (which widen the Lorenz wings via ``rho``) visibly bloom the shape.
+Long-exposure persistence buffer with **color-preserving accumulation**: rather
+than summing RGB (which clips toward white wherever the curve overlaps itself),
+each frame accumulates two things separately —
 
-Pipeline per frame: decay -> splat new segment -> filmic tone-map -> bloom ->
-downscale (supersampled for clean anti-aliasing). No GPU or ffmpeg needed.
+* ``col`` — intensity-weighted hue,  and
+* ``den`` — scalar density (intensity),
+
+both decaying slowly. The output hue is ``col / den`` (so overlapping same-hue
+windings stay that hue instead of washing to white) and the brightness is a
+tone-mapped function of ``den``. Finished with bloom over a supersampled buffer.
+No GPU or ffmpeg needed.
 """
 
 from __future__ import annotations
@@ -36,65 +39,86 @@ _SPAN = 30.0
 
 
 def render_gif(
-    traj: Trajectory,
+    traj: "Trajectory | list[Trajectory]",
     path: str,
     *,
     size: int = 460,
     supersample: int = 2,
     background: tuple[int, int, int] = (4, 5, 13),
     decay: float | None = None,
-    exposure: float = 2.6,
-    bloom: float = 0.7,
+    exposure: float = 3.2,
+    bloom: float = 0.6,
 ) -> str:
-    """Render ``traj`` to a long-exposure animated GIF at ``path``."""
+    """Render one or several Lorenz trajectories to a long-exposure GIF.
+
+    Multiple trajectories (e.g. one per frequency band) are composited into the
+    same color-preserving buffers, so overlapping wings blend their hues.
+    """
     from PIL import Image, ImageChops, ImageFilter
 
-    n_video = len(traj.frame_end)
+    trajs = [traj] if isinstance(traj, Trajectory) else list(traj)
+    n_video = min(len(t.frame_end) for t in trajs)
     ss = size * supersample
     bg = np.asarray(background, dtype=np.float32)
     bg_head = 255.0 - bg
 
-    # slow persistence: map the track's fade tag into a high decay factor
     if decay is None:
-        decay = float(np.clip(0.985 + 0.011 * traj.fade, 0.985, 0.996))
+        decay = float(np.clip(0.985 + 0.011 * trajs[0].fade, 0.985, 0.996))
 
-    rgb_lut = _hue_to_rgb(traj.hue, traj.saturation)
+    luts = [_hue_to_rgb(t.hue, t.sat) for t in trajs]   # per-point vivid colors
 
-    accum = np.zeros((ss, ss, 3), dtype=np.float32)
+    # one (color, density) buffer pair PER curve, so curves keep their own hue;
+    # they are combined by lighten (max) at output time — averaging different
+    # hues into a shared buffer would grey out the overlap region.
+    cols = [np.zeros((ss, ss, 3), dtype=np.float32) for _ in trajs]
+    dens = [np.zeros((ss, ss), dtype=np.float32) for _ in trajs]
     half = ss / 2.0
-    scale = (ss * 0.40) / _SPAN
+    base_scale = (ss * 0.40) / _SPAN
     blur_radius = ss * 0.0065
 
     frames = []
-    prev_end = 0
+    prev_end = [0] * len(trajs)
+    nb = len(trajs)
     for f in range(n_video):
-        accum *= decay
+        for ti, t in enumerate(trajs):
+            cols[ti] *= decay
+            dens[ti] *= decay
+            end = int(t.frame_end[f])
+            lo = max(0, prev_end[ti] - 1)
+            prev_end[ti] = end
+            if end - lo >= 2:
+                pts = t.points[lo:end]
+                glow = t.glow[lo:end]
+                cc = luts[ti][lo:end]
+                px, py = _project(pts, half, base_scale * t.scale)
+                depth = _depth_shade(pts)
+                inten = (0.35 + 0.75 * glow) * depth
+                inten[-6:] *= 2.0                      # hot (bright) head, same hue
+                _draw_curve(cols[ti], dens[ti], px, py, cc, inten, ss)
 
-        end = int(traj.frame_end[f])
-        lo = max(0, prev_end - 1)            # overlap one point for continuity
-        prev_end = end
-        if end - lo >= 2:
-            pts = traj.points[lo:end]
-            glow = traj.glow[lo:end]
-            cols = rgb_lut[lo:end]
-
-            px, py = _project(pts, half, scale)
-            depth = _depth_shade(pts)        # subtle 3-D form cue
-            inten = (0.35 + 0.75 * glow) * depth
-            # brighten the freshest points so the head reads as a hot core
-            inten[-6:] *= 2.2
-            _draw_curve(accum, px, py, cols * inten[:, None], ss)
-
-        # filmic tone-map: 1 - exp(-x) -> graceful highlights, no harsh clip
-        toned = 1.0 - np.exp(-accum * exposure)
-        rgb = bg + bg_head * toned
+        # occlusion compositing: each pixel takes the PURE color of the densest
+        # curve there (like depth ordering), so overlaps stay saturated instead
+        # of blending toward grey/white.
+        if nb == 1:
+            mean_col = cols[0] / np.maximum(dens[0][:, :, None], 1e-6)
+            lum = 1.0 - np.exp(-dens[0] * exposure)
+            rgb = bg + bg_head * mean_col * lum[:, :, None]
+        else:
+            dstack = np.stack(dens)                    # (nb, ss, ss)
+            win = dstack.argmax(0)                      # densest curve per pixel
+            wsel = win[None, :, :, None]
+            mean_cols = np.stack([cols[i] / np.maximum(dens[i][:, :, None], 1e-6)
+                                  for i in range(nb)])
+            win_col = np.take_along_axis(mean_cols, wsel, 0)[0]
+            win_den = np.take_along_axis(dstack, win[None], 0)[0]
+            lum = 1.0 - np.exp(-win_den * exposure)
+            rgb = bg + bg_head * win_col * lum[:, :, None]
         img = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8), "RGB")
 
         if bloom > 0:
             halo = img.filter(ImageFilter.GaussianBlur(blur_radius))
             halo = halo.point(lambda v: int(v * bloom))
             img = ImageChops.add(img, halo)
-
         if supersample != 1:
             img = img.resize((size, size), Image.LANCZOS)
         frames.append(img)
@@ -105,7 +129,7 @@ def render_gif(
         path,
         save_all=True,
         append_images=frames[1:],
-        duration=int(1000 / max(traj.fps, 1)),
+        duration=int(1000 / max(trajs[0].fps, 1)),
         loop=0,
         optimize=True,
         disposal=2,
@@ -115,7 +139,6 @@ def render_gif(
 
 # --------------------------------------------------------------------------- #
 def _project(pts: np.ndarray, half: float, scale: float):
-    """Static orthographic projection with a gentle tilt (z up)."""
     x, y, z = pts[:, 0], pts[:, 1], pts[:, 2]
     screen_x = x
     screen_y = -(z - _Z_CENTER) * 0.95 + y * 0.30
@@ -123,41 +146,44 @@ def _project(pts: np.ndarray, half: float, scale: float):
 
 
 def _depth_shade(pts: np.ndarray) -> np.ndarray:
-    """Brighten points nearer the camera (along +y) for a 3-D read."""
     y = pts[:, 1]
     d = (y + 25.0) / 50.0
     return np.clip(0.6 + 0.5 * d, 0.4, 1.2)
 
 
-def _draw_curve(buf, px, py, colors, size):
-    """Splat each point, interpolating between samples for a continuous curve."""
-    k = _KERNEL[:, :, None]
+def _draw_curve(col, den, px, py, cols, inten, size):
+    """Splat intensity-weighted color into ``col`` and intensity into ``den``,
+    interpolating between samples for a continuous curve."""
+    k = _KERNEL
     m = len(px)
     for i in range(m):
-        _splat_one(buf, px[i], py[i], colors[i], size, k)
+        _splat(col, den, px[i], py[i], cols[i], inten[i], size, k)
         if i + 1 < m:
             dx, dy = px[i + 1] - px[i], py[i + 1] - py[i]
             dist = (dx * dx + dy * dy) ** 0.5
-            # don't connect across teleports (re-seed / onset kicks); just gap
-            if dist > size * 0.12:
+            if dist > size * 0.12:                     # don't connect teleports
                 continue
             steps = int(dist / 1.3)
             if steps > 0:
-                cc = 0.5 * (colors[i] + colors[i + 1])
+                cc = 0.5 * (cols[i] + cols[i + 1])
+                ic = 0.5 * (inten[i] + inten[i + 1])
                 for t in np.linspace(0.0, 1.0, steps + 2)[1:-1]:
-                    _splat_one(buf, px[i] + dx * t, py[i] + dy * t, cc, size, k)
+                    _splat(col, den, px[i] + dx * t, py[i] + dy * t, cc, ic, size, k)
 
 
-def _splat_one(buf, x, y, color, size, k):
+def _splat(col, den, x, y, color, inten, size, k):
     x0, y0 = int(round(x)), int(round(y))
     if _KR <= x0 < size - _KR and _KR <= y0 < size - _KR:
-        buf[y0 - _KR:y0 + _KR + 1, x0 - _KR:x0 + _KR + 1, :] += k * color[None, None, :]
+        sl = (slice(y0 - _KR, y0 + _KR + 1), slice(x0 - _KR, x0 + _KR + 1))
+        ki = k * inten
+        col[sl[0], sl[1], :] += ki[:, :, None] * color[None, None, :]
+        den[sl] += ki
 
 
-def _hue_to_rgb(hue: np.ndarray, sat: float) -> np.ndarray:
+def _hue_to_rgb(hue: np.ndarray, sat: np.ndarray) -> np.ndarray:
     out = np.empty((hue.size, 3), dtype=np.float32)
-    for i, h in enumerate(hue):
-        out[i] = colorsys.hsv_to_rgb(float(h) % 1.0, sat, 1.0)
+    for i in range(hue.size):
+        out[i] = colorsys.hsv_to_rgb(float(hue[i]) % 1.0, float(sat[i]), 1.0)
     return out
 
 

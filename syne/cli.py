@@ -38,7 +38,7 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
 
 def _cmd_render(args: argparse.Namespace) -> int:
     from syne.pipeline import analyze_file
-    from syne.render.lorenz import build_control, integrate
+    from syne.render.lorenz import build_band_trajectories, build_control, integrate
     from syne.render.raster import render_gif
     from syne.semantics.schema import SemanticProfile
 
@@ -55,10 +55,17 @@ def _cmd_render(args: argparse.Namespace) -> int:
 
     out = args.output or _strip_ext(args.input) + ".lorenz.gif"
     if not args.no_gif:
-        traj = integrate(
-            control, fps=args.fps, substeps=args.substeps,
-            speed_scale=args.speed, max_seconds=args.seconds,
-        )
+        if args.curves > 1:
+            traj = build_band_trajectories(
+                profile, fps=args.fps, substeps=args.substeps,
+                speed_scale=args.speed, max_seconds=args.seconds,
+            )
+            print(f"rendering {len(traj)} band curves", file=sys.stderr)
+        else:
+            traj = integrate(
+                control, fps=args.fps, substeps=args.substeps,
+                speed_scale=args.speed, max_seconds=args.seconds,
+            )
         render_gif(traj, out, size=args.size, decay=args.decay)
         print(f"wrote animation       -> {out}", file=sys.stderr)
 
@@ -141,6 +148,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="head travel-speed multiplier (default 3.0)")
     render.add_argument("--substeps", type=int, default=12,
                         help="integration substeps per frame (default 12)")
+    render.add_argument("--curves", type=int, default=3,
+                        help="number of band curves to composite (1 = single, "
+                        "default 3 = bass/mid/treble)")
     render.add_argument("--decay", type=float, default=None,
                         help="persistence per frame, 0..1 (higher = slower fade; "
                         "default derived from the track's dynamic range)")

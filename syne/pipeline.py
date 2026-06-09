@@ -71,6 +71,10 @@ def _build_timelines(f: FeatureBundle) -> Timelines:
     sums[sums == 0] = 1.0
     chroma_norm = chroma_t / sums
 
+    # bands: (n_bands, n) -> per-frame vectors, each band robust-normalized to 0..1
+    bands = librosa.util.fix_length(f.band_energy, size=n, axis=1)
+    bands_norm = np.stack([normalize01(grid(b)) for b in bands], axis=1)  # (n, n_bands)
+
     segments = _build_segments(f)
 
     return Timelines(
@@ -81,6 +85,7 @@ def _build_timelines(f: FeatureBundle) -> Timelines:
         flux=to_list(flux),
         onset_strength=to_list(onset),
         chroma=[to_list(row, decimals=4) for row in chroma_norm],
+        bands=[to_list(row, decimals=4) for row in bands_norm],
         beats=to_list(f.rhythm.beat_times),
         segments=segments,
     )

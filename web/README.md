@@ -40,7 +40,13 @@ file):
 | `kick` | impulse flutter | onset strength |
 | `jitter` | surface noise | spectral flux |
 | `glow` | line intensity | energy |
-| `hue` / `saturation` | color | key/chroma / valence |
+| `hue` | color | full 12-D chroma (circle of fifths) |
+| `sat` | color saturation | tonal clarity |
 | `seeds` | state re-seed | section boundaries |
+
+The viewer currently renders a **single** attractor (the full mix) with the
+harmonic color mapping. The offline `syne render` additionally composites one
+curve per frequency band (`--curves`); porting that multi-curve mode to the
+viewer is on the roadmap.
 
 Dependencies: Three.js, loaded from a CDN via an import map (needs network).

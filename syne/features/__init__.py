@@ -31,6 +31,7 @@ class FeatureBundle:
     timbre: TimbreFeatures
     dynamics: DynamicsFeatures
     structure: StructureFeatures
+    band_energy: np.ndarray      # (n_bands, n_frames) log-spaced band RMS
 
 
 def extract_features(clip: AudioClip) -> FeatureBundle:
@@ -43,6 +44,7 @@ def extract_features(clip: AudioClip) -> FeatureBundle:
     timbre_f = timbre.extract(clip, S)
     dynamics_f = dynamics.extract(clip, S)
     structure_f = structure.extract(clip, S, tonal_f.chroma)
+    band_energy = _band_energy(S, clip)
 
     n_frames = S.shape[1]
     frame_times = librosa.frames_to_time(
@@ -57,7 +59,27 @@ def extract_features(clip: AudioClip) -> FeatureBundle:
         timbre=timbre_f,
         dynamics=dynamics_f,
         structure=structure_f,
+        band_energy=band_energy,
     )
+
+
+def _band_energy(S: np.ndarray, clip: AudioClip, n_bands: int = 3) -> np.ndarray:
+    """Per-frame RMS energy in ``n_bands`` log-spaced frequency bands.
+
+    Splits the spectrum into (by default) bass / mid / treble — the spectral
+    balance that a single ``brightness`` scalar otherwise throws away.
+    """
+    freqs = librosa.fft_frequencies(sr=clip.sample_rate, n_fft=clip.n_fft)
+    fmin = max(freqs[1], 20.0)
+    fmax = clip.sample_rate / 2.0
+    edges = np.logspace(np.log10(fmin), np.log10(fmax), n_bands + 1)
+    power = S ** 2
+    out = np.zeros((n_bands, S.shape[1]), dtype=np.float32)
+    for b in range(n_bands):
+        mask = (freqs >= edges[b]) & (freqs < edges[b + 1])
+        if np.any(mask):
+            out[b] = np.sqrt(power[mask].mean(axis=0))
+    return out
 
 
 __all__ = ["FeatureBundle", "extract_features"]

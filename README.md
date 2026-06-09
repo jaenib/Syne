@@ -31,9 +31,9 @@ it*:
 - **Track-level tags** — global, grouped descriptors (tempo, key/mode, mood as
   valence/arousal, energy, timbre, genre hints).
 - **Timelines** — per-frame signals on a shared time grid (energy, brightness,
-  spectral flux, onset strength, 12-D chroma) plus beat times and section
-  boundaries — so geometry can morph *with* the music, not just react to one
-  global mood.
+  spectral flux, onset strength, 12-D chroma, bass/mid/treble band energies)
+  plus beat times and section boundaries — so geometry can morph *with* the
+  music, not just react to one global mood.
 
 ## Install
 
@@ -98,6 +98,7 @@ for a full sample. Shape:
     "flux":           [ ... ],
     "onset_strength": [ ... ],
     "chroma":         [ [12 floats], ... ],
+    "bands":          [ [3 floats], ... ],   // per-frame bass/mid/treble energy
     "beats":          [ ... ],   // beat times (s)
     "segments":       [ { "start": 0.0, "end": 3.1, "label": "section_0", "novelty": 0.0 } ]
   }
@@ -145,12 +146,26 @@ offline GIF rasterizer (no GPU / ffmpeg) and an audio-synced
 | `kick` | impulse flutter | onset strength | jolts the state on attacks/beats |
 | `jitter` | surface agitation | spectral flux | per-step positional noise |
 | `glow` | line intensity | energy | brightness of the trail |
-| `hue` / `saturation` | color | key + chroma / valence | circle-of-fifths hue, valence saturation |
+| `hue` | color | **full 12-D chroma** | chroma-weighted circular mean on the circle of fifths — harmony, not just the loudest note, paints the curve (+ a valence warm/cool tint) |
+| `sat` | color saturation | tonal clarity − roughness | peaky/tonal = vivid, spread/noisy = washed |
 | `seeds` | state re-seed | section boundaries | a visual "scene change" when structure changes |
 
 So a calm, sparse track yields an ordered, slow spiral; a loud, fast, dynamic
 track yields wide, fluttering, fast chaotic wings — and the shape morphs
 continuously as those qualities change through the piece.
+
+#### Multiple curves — one per frequency band
+
+A single attractor only has so many handles, so to surface the **spectral
+balance** (otherwise crushed into one `brightness` scalar) Syne renders one
+Lorenz curve per log-spaced frequency band (bass / mid / treble by default).
+Each band's energy drives its own curve's wing-size (`rho`) and glow, each gets
+a hue offset and size, and the curves are composited by **occlusion** (each
+pixel takes the densest curve's pure color) so overlaps stay saturated instead
+of averaging to grey. The result reads the spectrum directly: a bass-heavy
+moment blooms the large warm curve, a bright moment the small cool one.
+
+Use `--curves 1` for a single attractor, `--curves 3` (default) for bands.
 
 The GIF renderer uses a **long-exposure persistence buffer**: the whole
 attractor stays visible at all times and fades slowly, while a fast head keeps
@@ -163,8 +178,8 @@ with filmic tone-mapping and bloom over a supersampled buffer.
 # audio -> animated GIF (analyze + map + integrate + rasterize)
 syne render track.wav -o track.lorenz.gif
 
-# tune the look: faster head, slower fade, bigger canvas
-syne render track.wav --speed 4 --decay 0.994 --size 600
+# tune the look: faster head, slower fade, bigger canvas, single curve
+syne render track.wav --speed 4 --decay 0.994 --size 600 --curves 1
 
 # export per-frame control JSON for the web viewer (no GIF)
 syne render track.wav --controls track.lorenz.json --no-gif
@@ -207,8 +222,8 @@ syne/
   semantics/schema.py # SemanticProfile dataclasses = the JSON contract
   morph/drivers.py    # SemanticProfile -> generic renderer control channels
   render/
-    lorenz.py         # the connectors: tags -> Lorenz params + RK4 integrator
-    raster.py         # Trajectory -> animated GIF (Pillow, additive glow)
+    lorenz.py         # connectors: tags -> Lorenz params, RK4 integrator, band curves
+    raster.py         # Trajectory(s) -> GIF (long-exposure, color-preserving, occlusion)
   pipeline.py         # orchestration: file -> SemanticProfile
   cli.py              # `syne analyze` / `syne render`
 web/                  # interactive, audio-synced WebGL viewer (Three.js)
@@ -235,9 +250,11 @@ profile = analyze_clip(load_audio("track.wav"), tagger=MyModelTagger())
 
 - [x] Renderer turning the semantic info into morphing geometry (Lorenz butterfly).
 - [x] Audio-synced interactive WebGL viewer.
+- [x] Harmonic color (full chroma) + per-frame saturation.
+- [x] Multiple curves (one per frequency band) to surface the spectrum.
+- [ ] Port multi-curve band rendering to the web viewer.
 - [ ] Optional deep-learning tagger adapter (e.g. MTG-Jamendo tags).
 - [ ] Beat-synchronous timelines for tighter visual sync.
-- [ ] More attractors / geometry modes selectable per track.
 
 ## Tests
 

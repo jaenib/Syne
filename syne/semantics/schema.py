@@ -115,6 +115,7 @@ class Timelines:
     flux: list[float]                # 0..1 spectral flux (change / motion)
     onset_strength: list[float]      # 0..1 onset envelope (attacks)
     chroma: list[list[float]]        # per-frame 12-dim pitch class energies
+    bands: list[list[float]]         # per-frame log-spaced band energies (0..1)
     beats: list[float] = field(default_factory=list)      # beat times (s)
     segments: list[Segment] = field(default_factory=list)
 
@@ -170,6 +171,7 @@ class SemanticProfile:
             flux=tl["flux"],
             onset_strength=tl["onset_strength"],
             chroma=tl["chroma"],
+            bands=tl.get("bands", []),
             beats=tl.get("beats", []),
             segments=[Segment(**s) for s in tl.get("segments", [])],
         )

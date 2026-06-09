@@ -58,7 +58,6 @@ class LorenzControl:
     base_dt: float                   # lorenz-time advanced per video frame (pre-speed)
     rotation_speed: float            # camera yaw rate, 0..1
     fade: float                      # trail persistence, 0..1
-    saturation: float                # color saturation from valence, 0..1
     # per-frame channels (same length as ``times``)
     rho: list[float]
     sigma: list[float]
@@ -67,7 +66,8 @@ class LorenzControl:
     kick: list[float]                # 0..1 onset impulse
     jitter: list[float]              # 0..1 flux noise
     glow: list[float]                # 0..1 intensity
-    hue: list[float]                 # 0..1 color
+    hue: list[float]                 # 0..1 color (from full chroma)
+    sat: list[float]                 # 0..1 saturation (from tonal clarity)
     seeds: list[float] = field(default_factory=list)   # section boundary times
     bindings: dict[str, str] = field(default_factory=dict)
 
@@ -84,12 +84,13 @@ class LorenzControl:
 class Trajectory:
     points: np.ndarray               # (N, 3)
     hue: np.ndarray                  # (N,) 0..1
+    sat: np.ndarray                  # (N,) 0..1
     glow: np.ndarray                 # (N,) 0..1
     frame_end: np.ndarray            # (F,) index into points for each video frame
     fps: int
     rotation_speed: float
     fade: float
-    saturation: float
+    scale: float = 1.0               # relative size when compositing multiple curves
 
 
 # --------------------------------------------------------------------------- #
@@ -123,12 +124,17 @@ def build_control(profile: SemanticProfile) -> LorenzControl:
     jitter = flux
     glow = 0.2 + 0.8 * energy
 
-    # color: base hue from key, drifting with the per-frame dominant pitch class
-    base_hue = _key_to_hue01(tags.tonal.key)
-    chroma_shift = _chroma_shift(tl.chroma, n)
-    hue = (base_hue + 0.15 * chroma_shift) % 1.0
+    # color: continuous hue from the FULL 12-D chroma (weighted circular mean
+    # over the circle of fifths) so harmony — not just the loudest note —
+    # paints the curve, with a gentle valence warm/cool tint.
+    hue, clarity = _chroma_to_hue(tl.chroma, n)
+    tint = (0.5 - tags.mood.valence) * 0.10                     # warm major / cool minor
+    hue = (hue + tint) % 1.0
 
-    saturation = float(np.clip(0.45 + 0.5 * tags.mood.valence, 0, 1))
+    # saturation per frame from tonal clarity (peaky chroma = vivid; spread /
+    # noisy = washed), knocked down by a rough/noisy timbre.
+    sat = np.clip(0.30 + 0.85 * clarity - 0.25 * tags.timbre.roughness, 0.25, 1.0)
+
     fade = float(np.clip(0.78 + 0.18 * tags.energy.dynamic_range, 0, 0.97))
     rotation_speed = float(np.clip((tags.rhythm.tempo_bpm - 40.0) / 160.0, 0.05, 1.0))
     seeds = [s.start for s in tl.segments if s.start > 0.0]
@@ -141,8 +147,8 @@ def build_control(profile: SemanticProfile) -> LorenzControl:
         "kick": "impulse flutter    <- onset strength",
         "jitter": "surface noise    <- spectral flux",
         "glow": "line intensity     <- energy",
-        "hue": "color              <- key + chroma drift",
-        "saturation": "color saturation <- valence",
+        "hue": "color              <- full chroma (circle of fifths) + valence tint",
+        "sat": "color saturation   <- tonal clarity - timbre roughness",
         "fade": "trail persistence  <- dynamic range",
         "rotation_speed": "camera yaw <- tempo",
         "seeds": "state re-seed      <- section boundaries",
@@ -153,7 +159,6 @@ def build_control(profile: SemanticProfile) -> LorenzControl:
         base_dt=base_dt,
         rotation_speed=rotation_speed,
         fade=fade,
-        saturation=saturation,
         rho=_r(rho),
         sigma=_r(sigma),
         beta=_r(beta),
@@ -162,9 +167,87 @@ def build_control(profile: SemanticProfile) -> LorenzControl:
         jitter=_r(jitter),
         glow=_r(glow),
         hue=_r(hue),
+        sat=_r(sat),
         seeds=[round(float(s), 4) for s in seeds],
         bindings=bindings,
     )
+
+
+def build_band_controls(
+    profile: SemanticProfile, *, hue_spread: float = 0.34
+) -> list[LorenzControl]:
+    """One :class:`LorenzControl` per frequency band (bass/mid/treble...).
+
+    All curves share the rhythm/harmony connectors, but each band drives its
+    own wing-size (``rho``) and intensity (``glow``) from that band's energy,
+    gets a hue offset for color separation, and a different ``beta`` so the
+    butterflies don't perfectly coincide. Together they show the spectral
+    balance morphing over time.
+    """
+    base = build_control(profile)
+    bands = profile.timelines.bands
+    if not bands:
+        return [base]
+
+    arr = np.asarray(bands, dtype=float)             # (n_frames, n_bands)
+    n = len(base.times)
+    if arr.ndim != 2 or arr.shape[0] != n:
+        return [base]
+    n_bands = arr.shape[1]
+    if n_bands < 2:
+        return [base]
+
+    tags = profile.tags
+    chaos = float(np.clip(0.55 * tags.mood.arousal + 0.45 * tags.energy.level, 0, 1))
+    rho_base = 14.0 + 32.0 * chaos
+    flux = np.asarray(profile.timelines.flux, dtype=float)
+    flux = np.resize(flux, n)
+    hue0 = np.asarray(base.hue, dtype=float)
+    beta0 = np.asarray(base.beta, dtype=float)
+
+    offsets = np.linspace(-hue_spread / 2, hue_spread / 2, n_bands)
+    beta_mul = np.linspace(0.8, 1.25, n_bands)        # bass taller, treble pinched
+
+    controls = []
+    for b in range(n_bands):
+        be = arr[:, b]
+        rho_b = rho_base * (0.8 + 0.55 * be) + 5.0 * flux
+        glow_b = np.clip(0.10 + 0.95 * be, 0.0, 1.0)
+        hue_b = (hue0 + offsets[b]) % 1.0
+        beta_b = beta0 * beta_mul[b]
+        controls.append(
+            LorenzControl(
+                times=base.times, base_dt=base.base_dt,
+                rotation_speed=base.rotation_speed, fade=base.fade,
+                rho=_r(rho_b), sigma=base.sigma, beta=_r(beta_b),
+                speed=base.speed, kick=base.kick, jitter=base.jitter,
+                glow=_r(glow_b), hue=_r(hue_b), sat=base.sat,
+                seeds=base.seeds, bindings=base.bindings,
+            )
+        )
+    return controls
+
+
+def build_band_trajectories(
+    profile: SemanticProfile,
+    *,
+    fps: int = 30,
+    substeps: int = 12,
+    speed_scale: float = 3.0,
+    max_seconds: float | None = None,
+) -> list[Trajectory]:
+    """Integrate one trajectory per band, sized so they read as distinct."""
+    controls = build_band_controls(profile)
+    scales = (
+        np.linspace(1.15, 0.72, len(controls)) if len(controls) > 1 else np.array([1.0])
+    )
+    trajs = []
+    for i, c in enumerate(controls):
+        tr = integrate(c, fps=fps, substeps=substeps, speed_scale=speed_scale,
+                       max_seconds=max_seconds, seed=7 + i * 5)
+        tr.scale = float(scales[i])
+        trajs.append(tr)
+    return trajs
 
 
 # --------------------------------------------------------------------------- #
@@ -197,11 +280,11 @@ def integrate(
 
     rho, sigma, beta = rs(control.rho), rs(control.sigma), rs(control.beta)
     speed, kick, jitter = rs(control.speed), rs(control.kick), rs(control.jitter)
-    glow, hue = rs(control.glow), rs(control.hue)
+    glow, hue, sat = rs(control.glow), rs(control.hue), rs(control.sat)
 
     rng = np.random.default_rng(seed)
     state = np.array([0.1, 0.0, 0.0])
-    pts, hcol, gcol, frame_end = [], [], [], []
+    pts, hcol, scol, gcol, frame_end = [], [], [], [], []
     seed_times = sorted(control.seeds)
     si = 0
 
@@ -218,6 +301,7 @@ def integrate(
                 state = state + rng.standard_normal(3) * jitter[f] * 0.12
             pts.append(state.copy())
             hcol.append(hue[f])
+            scol.append(sat[f])
             gcol.append(glow[f])
 
         if kick[f] > 0.2:                          # visible jolt on onsets
@@ -228,12 +312,12 @@ def integrate(
     return Trajectory(
         points=np.asarray(pts),
         hue=np.asarray(hcol),
+        sat=np.asarray(scol),
         glow=np.asarray(gcol),
         frame_end=np.asarray(frame_end),
         fps=fps,
         rotation_speed=control.rotation_speed,
         fade=control.fade,
-        saturation=control.saturation,
     )
 
 
@@ -251,23 +335,38 @@ def _rk4(s: np.ndarray, sigma: float, rho: float, beta: float, dt: float) -> np.
     return s + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
 
 
-def _key_to_hue01(key: str) -> float:
-    try:
-        return _CIRCLE_OF_FIFTHS.index(key) / 12.0
-    except ValueError:
-        return 0.0
+# hue position of each pitch class on the circle of fifths (so fifth-related
+# notes are adjacent in color): pitch class pc -> ((pc*7) % 12) / 12
+_PC_HUE = ((np.arange(12) * 7) % 12) / 12.0
+_PC_ANGLE = 2 * np.pi * _PC_HUE
 
 
-def _chroma_shift(chroma: list[list[float]], n: int) -> np.ndarray:
-    out = np.zeros(n)
+def _chroma_to_hue(chroma: list[list[float]], n: int) -> tuple[np.ndarray, np.ndarray]:
+    """Continuous hue + tonal clarity from the full 12-D chroma per frame.
+
+    Hue is the chroma-weighted circular mean over the circle-of-fifths color
+    wheel; clarity is the peak share of the dominant pitch class (1.0 = a single
+    pure tone, low = energy spread across many notes / noise).
+    """
+    hue = np.zeros(n)
+    clarity = np.zeros(n)
     for i, frame in enumerate(chroma[:n]):
-        if frame and max(frame) > 0:
-            out[i] = int(np.argmax(frame)) / 12.0
-    return out
+        w = np.asarray(frame, dtype=float)
+        total = w.sum()
+        if total <= 0:
+            continue
+        x = float(np.sum(w * np.cos(_PC_ANGLE)))
+        y = float(np.sum(w * np.sin(_PC_ANGLE)))
+        hue[i] = (np.arctan2(y, x) % (2 * np.pi)) / (2 * np.pi)
+        clarity[i] = float(w.max() / total)
+    return hue, clarity
 
 
 def _r(x: np.ndarray, d: int = 5) -> list[float]:
     return [round(float(v), d) for v in np.asarray(x).ravel()]
 
 
-__all__ = ["LorenzControl", "Trajectory", "build_control", "integrate"]
+__all__ = [
+    "LorenzControl", "Trajectory", "build_control", "integrate",
+    "build_band_controls", "build_band_trajectories",
+]
