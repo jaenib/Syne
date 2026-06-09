@@ -152,15 +152,27 @@ So a calm, sparse track yields an ordered, slow spiral; a loud, fast, dynamic
 track yields wide, fluttering, fast chaotic wings — and the shape morphs
 continuously as those qualities change through the piece.
 
+The GIF renderer uses a **long-exposure persistence buffer**: the whole
+attractor stays visible at all times and fades slowly, while a fast head keeps
+re-tracing it (so energy surges that widen the wings bloom the shape), finished
+with filmic tone-mapping and bloom over a supersampled buffer.
+
 ### Render
 
 ```bash
 # audio -> animated GIF (analyze + map + integrate + rasterize)
 syne render track.wav -o track.lorenz.gif
 
+# tune the look: faster head, slower fade, bigger canvas
+syne render track.wav --speed 4 --decay 0.994 --size 600
+
 # export per-frame control JSON for the web viewer (no GIF)
 syne render track.wav --controls track.lorenz.json --no-gif
 ```
+
+Key knobs: `--speed` (head velocity), `--decay` (trail persistence, higher =
+slower fade; default derived from the track's dynamic range), `--substeps`
+(curve density), `--size`, `--fps`, `--seconds`.
 
 ```python
 from syne.pipeline import analyze_file

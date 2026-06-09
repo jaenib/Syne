@@ -1,9 +1,13 @@
 """Offline rasterizer: a Lorenz :class:`Trajectory` -> animated GIF.
 
-Renders a glowing "comet" — a fading tail of recent trajectory points — with a
-slowly rotating camera. Points are splatted additively onto a float buffer so
-overlapping curve segments bloom, giving the attractor its luminous look
-without any GPU or ffmpeg dependency.
+Uses a **persistence (long-exposure) buffer**: every frame the accumulation is
+multiplied by a decay factor and the newly-integrated segment is splatted in
+additively. With a slow decay the whole butterfly stays visible at all times
+and fades gently, while a fast-travelling head keeps redrawing it — so energy
+surges (which widen the Lorenz wings via ``rho``) visibly bloom the shape.
+
+Pipeline per frame: decay -> splat new segment -> filmic tone-map -> bloom ->
+downscale (supersampled for clean anti-aliasing). No GPU or ffmpeg needed.
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ import numpy as np
 
 from syne.render.lorenz import Trajectory
 
-# 5x5 soft splat kernel (normalized-ish gaussian) for the glow
+# 5x5 soft splat kernel for the glow
 _KERNEL = np.array(
     [
         [0.05, 0.12, 0.18, 0.12, 0.05],
@@ -27,7 +31,6 @@ _KERNEL = np.array(
 )
 _KR = _KERNEL.shape[0] // 2
 
-# Lorenz attractor roughly spans x,y in [-25,25], z in [0,50]; center z.
 _Z_CENTER = 25.0
 _SPAN = 30.0
 
@@ -36,59 +39,73 @@ def render_gif(
     traj: Trajectory,
     path: str,
     *,
-    size: int = 480,
-    tail: int = 260,
-    background: tuple[int, int, int] = (6, 7, 16),
-    gain: float = 200.0,
+    size: int = 460,
+    supersample: int = 2,
+    background: tuple[int, int, int] = (4, 5, 13),
+    decay: float | None = None,
+    exposure: float = 2.6,
+    bloom: float = 0.7,
 ) -> str:
-    """Render ``traj`` to an animated GIF at ``path``; returns ``path``."""
-    from PIL import Image
+    """Render ``traj`` to a long-exposure animated GIF at ``path``."""
+    from PIL import Image, ImageChops, ImageFilter
 
     n_video = len(traj.frame_end)
+    ss = size * supersample
     bg = np.asarray(background, dtype=np.float32)
-    rot_k = traj.rotation_speed * 0.045          # radians per frame
-    sat = traj.saturation
+    bg_head = 255.0 - bg
 
-    # precompute HSV->RGB per point (value handled later via intensity)
-    rgb_lut = _hue_to_rgb(traj.hue, sat)
+    # slow persistence: map the track's fade tag into a high decay factor
+    if decay is None:
+        decay = float(np.clip(0.985 + 0.011 * traj.fade, 0.985, 0.996))
+
+    rgb_lut = _hue_to_rgb(traj.hue, traj.saturation)
+
+    accum = np.zeros((ss, ss, 3), dtype=np.float32)
+    half = ss / 2.0
+    scale = (ss * 0.40) / _SPAN
+    blur_radius = ss * 0.0065
 
     frames = []
-    half = size / 2.0
-    scale = (size * 0.42) / _SPAN
+    prev_end = 0
     for f in range(n_video):
-        head = int(traj.frame_end[f])
-        lo = max(0, head - tail)
-        m = head - lo
-        if m <= 1:
-            frames.append(Image.new("RGB", (size, size), tuple(background)))
-            continue
+        accum *= decay
 
-        pts = traj.points[lo:head]
-        glow = traj.glow[lo:head]
-        cols = rgb_lut[lo:head]
+        end = int(traj.frame_end[f])
+        lo = max(0, prev_end - 1)            # overlap one point for continuity
+        prev_end = end
+        if end - lo >= 2:
+            pts = traj.points[lo:end]
+            glow = traj.glow[lo:end]
+            cols = rgb_lut[lo:end]
 
-        px, py = _project(pts, rot_k * f, half, scale)
-        buf = np.zeros((size, size, 3), dtype=np.float32)
+            px, py = _project(pts, half, scale)
+            depth = _depth_shade(pts)        # subtle 3-D form cue
+            inten = (0.35 + 0.75 * glow) * depth
+            # brighten the freshest points so the head reads as a hot core
+            inten[-6:] *= 2.2
+            _draw_curve(accum, px, py, cols * inten[:, None], ss)
 
-        # along-tail fade: newest points brightest
-        ramp = np.linspace(0.12, 1.0, m) ** 1.6
-        inten = ramp * (0.3 + 0.8 * glow)
-        # whiten the comet head so the leading point reads clearly
-        head_cols = cols.copy()
-        head_cols[-12:] = 0.55 * head_cols[-12:] + 0.45
-        _draw_curve(buf, px, py, head_cols * inten[:, None], size)
+        # filmic tone-map: 1 - exp(-x) -> graceful highlights, no harsh clip
+        toned = 1.0 - np.exp(-accum * exposure)
+        rgb = bg + bg_head * toned
+        img = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8), "RGB")
 
-        img = np.clip(bg + buf * gain, 0, 255).astype(np.uint8)
-        frames.append(Image.fromarray(img, "RGB"))
+        if bloom > 0:
+            halo = img.filter(ImageFilter.GaussianBlur(blur_radius))
+            halo = halo.point(lambda v: int(v * bloom))
+            img = ImageChops.add(img, halo)
+
+        if supersample != 1:
+            img = img.resize((size, size), Image.LANCZOS)
+        frames.append(img)
 
     if not frames:
         frames = [Image.new("RGB", (size, size), tuple(background))]
-    duration_ms = int(1000 / max(traj.fps, 1))
     frames[0].save(
         path,
         save_all=True,
         append_images=frames[1:],
-        duration=duration_ms,
+        duration=int(1000 / max(traj.fps, 1)),
         loop=0,
         optimize=True,
         disposal=2,
@@ -97,31 +114,35 @@ def render_gif(
 
 
 # --------------------------------------------------------------------------- #
-def _project(pts: np.ndarray, angle: float, half: float, scale: float):
-    """Yaw about the vertical axis, then orthographic project with a slight tilt."""
+def _project(pts: np.ndarray, half: float, scale: float):
+    """Static orthographic projection with a gentle tilt (z up)."""
     x, y, z = pts[:, 0], pts[:, 1], pts[:, 2]
-    ca, sa = np.cos(angle), np.sin(angle)
-    xr = x * ca - y * sa
-    yr = x * sa + y * ca
-    screen_x = xr
-    screen_y = -(z - _Z_CENTER) * 0.95 + yr * 0.32      # z up, gentle tilt
-    px = half + screen_x * scale
-    py = half + screen_y * scale
-    return px, py
+    screen_x = x
+    screen_y = -(z - _Z_CENTER) * 0.95 + y * 0.30
+    return half + screen_x * scale, half + screen_y * scale
 
 
-def _draw_curve(buf: np.ndarray, px: np.ndarray, py: np.ndarray, colors: np.ndarray, size: int):
-    """Splat each point, interpolating between consecutive points so the
-    integration samples join into a continuous glowing curve."""
+def _depth_shade(pts: np.ndarray) -> np.ndarray:
+    """Brighten points nearer the camera (along +y) for a 3-D read."""
+    y = pts[:, 1]
+    d = (y + 25.0) / 50.0
+    return np.clip(0.6 + 0.5 * d, 0.4, 1.2)
+
+
+def _draw_curve(buf, px, py, colors, size):
+    """Splat each point, interpolating between samples for a continuous curve."""
     k = _KERNEL[:, :, None]
     m = len(px)
     for i in range(m):
         _splat_one(buf, px[i], py[i], colors[i], size, k)
-        if i + 1 < m:                       # fill the gap to the next sample
+        if i + 1 < m:
             dx, dy = px[i + 1] - px[i], py[i + 1] - py[i]
             dist = (dx * dx + dy * dy) ** 0.5
+            # don't connect across teleports (re-seed / onset kicks); just gap
+            if dist > size * 0.12:
+                continue
             steps = int(dist / 1.3)
-            if 0 < steps < 60:
+            if steps > 0:
                 cc = 0.5 * (colors[i] + colors[i + 1])
                 for t in np.linspace(0.0, 1.0, steps + 2)[1:-1]:
                     _splat_one(buf, px[i] + dx * t, py[i] + dy * t, cc, size, k)

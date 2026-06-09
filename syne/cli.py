@@ -55,8 +55,11 @@ def _cmd_render(args: argparse.Namespace) -> int:
 
     out = args.output or _strip_ext(args.input) + ".lorenz.gif"
     if not args.no_gif:
-        traj = integrate(control, fps=args.fps, max_seconds=args.seconds)
-        render_gif(traj, out, size=args.size, tail=args.tail)
+        traj = integrate(
+            control, fps=args.fps, substeps=args.substeps,
+            speed_scale=args.speed, max_seconds=args.seconds,
+        )
+        render_gif(traj, out, size=args.size, decay=args.decay)
         print(f"wrote animation       -> {out}", file=sys.stderr)
 
     if args.summary:
@@ -133,9 +136,14 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("--fps", type=int, default=30, help="frames per second (default 30)")
     render.add_argument("--seconds", type=float, default=None,
                         help="cap the rendered duration")
-    render.add_argument("--size", type=int, default=480, help="GIF size in px (default 480)")
-    render.add_argument("--tail", type=int, default=260,
-                        help="comet tail length in points (default 260)")
+    render.add_argument("--size", type=int, default=460, help="GIF size in px (default 460)")
+    render.add_argument("--speed", type=float, default=3.0,
+                        help="head travel-speed multiplier (default 3.0)")
+    render.add_argument("--substeps", type=int, default=12,
+                        help="integration substeps per frame (default 12)")
+    render.add_argument("--decay", type=float, default=None,
+                        help="persistence per frame, 0..1 (higher = slower fade; "
+                        "default derived from the track's dynamic range)")
     render.add_argument("--summary", action="store_true", help="print a summary")
     render.set_defaults(func=_cmd_render)
     return parser

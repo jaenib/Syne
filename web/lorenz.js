@@ -9,8 +9,10 @@
 
 import * as THREE from "three";
 
-const TAIL = 2600;            // trajectory points kept in the comet
-const SUBSTEPS = 6;          // integration substeps per animation frame
+const TAIL = 18000;          // points kept lit — long enough for the whole butterfly
+const SUBSTEPS = 14;         // integration substeps per animation frame
+const SPEED_SCALE = 2.5;     // head travel-speed multiplier
+const FADE_EXP = 0.55;       // <1 keeps more of the tail bright (more shape visible)
 const Z_CENTER = 25.0;
 
 let control = null;          // loaded control JSON
@@ -24,7 +26,7 @@ const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 
 const scene = new THREE.Scene();
-scene.fog = new THREE.FogExp2(0x05060f, 0.012);
+scene.fog = new THREE.FogExp2(0x05060f, 0.006);
 
 const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 1000);
 camera.position.set(0, 0, 95);
@@ -120,9 +122,9 @@ function step(dtReal) {
 
   // section re-seed: nudge the state at structural boundaries
   while (lastSeedIdx < control.seeds.length && control.seeds[lastSeedIdx] <= t) {
-    state.x += (Math.random() - 0.5) * 1.2;
-    state.y += (Math.random() - 0.5) * 1.2;
-    state.z += (Math.random() - 0.5) * 1.2;
+    state.x += (Math.random() - 0.5) * 0.7;
+    state.y += (Math.random() - 0.5) * 0.7;
+    state.z += (Math.random() - 0.5) * 0.7;
     lastSeedIdx++;
   }
 
@@ -135,7 +137,7 @@ function step(dtReal) {
   const glow = sample(control.glow, t);
   const hue = sample(control.hue, t);
 
-  const dt = (control.base_dt * Math.max(speed, 0.05)) / SUBSTEPS;
+  const dt = (control.base_dt * Math.max(speed, 0.05) * SPEED_SCALE) / SUBSTEPS;
   for (let i = 0; i < SUBSTEPS; i++) {
     state = rk4(state, sig, rho, beta, dt);
     if (jitter > 0) {
@@ -146,8 +148,8 @@ function step(dtReal) {
     trail.push({ x: state.x, y: state.y, z: state.z - Z_CENTER, h: hue, g: glow });
   }
   if (kick > 0.2) {
-    state.x += (Math.random() - 0.5) * kick * 1.4;
-    state.y += (Math.random() - 0.5) * kick * 1.4;
+    state.x += (Math.random() - 0.5) * kick * 0.9;
+    state.y += (Math.random() - 0.5) * kick * 0.9;
   }
   while (trail.length > TAIL) trail.shift();
 
@@ -157,8 +159,8 @@ function step(dtReal) {
   for (let i = 0; i < n; i++) {
     const p = trail[i];
     positions[i * 3] = p.x; positions[i * 3 + 1] = p.z; positions[i * 3 + 2] = p.y;
-    const fade = Math.pow((i + 1) / n, 1.5);
-    const v = fade * (0.3 + 0.8 * p.g);
+    const fade = Math.pow((i + 1) / n, FADE_EXP);
+    const v = fade * (0.35 + 0.75 * p.g);
     const rgb = hsvToRgb(p.h % 1, sat, 1);
     colors[i * 3] = rgb[0] * v; colors[i * 3 + 1] = rgb[1] * v; colors[i * 3 + 2] = rgb[2] * v;
   }

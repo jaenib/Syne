@@ -174,9 +174,14 @@ def integrate(
     fps: int = 30,
     substeps: int = 6,
     max_seconds: float | None = None,
+    speed_scale: float = 1.0,
     seed: int = 7,
 ) -> Trajectory:
-    """Integrate the Lorenz ODE (RK4) under time-varying control -> Trajectory."""
+    """Integrate the Lorenz ODE (RK4) under time-varying control -> Trajectory.
+
+    ``speed_scale`` multiplies how much Lorenz-time is advanced per video frame,
+    making the head travel faster (so the full attractor is traced quickly).
+    """
     times = np.asarray(control.times, dtype=float)
     if times.size < 2:
         times = np.array([0.0, 1.0])
@@ -203,10 +208,10 @@ def integrate(
     for f in range(n_frames):
         # section re-seed: a gentle nudge the attractor will reabsorb
         while si < len(seed_times) and seed_times[si] <= vt[f]:
-            state = state + rng.standard_normal(3) * 0.6
+            state = state + rng.standard_normal(3) * 0.35
             si += 1
 
-        dt = control.base_dt * max(speed[f], 0.05) / substeps
+        dt = control.base_dt * max(speed[f], 0.05) * speed_scale / substeps
         for _ in range(substeps):
             state = _rk4(state, sigma[f], rho[f], beta[f], dt)
             if jitter[f] > 0:
@@ -216,7 +221,7 @@ def integrate(
             gcol.append(glow[f])
 
         if kick[f] > 0.2:                          # visible jolt on onsets
-            state = state + rng.standard_normal(3) * kick[f] * 0.7
+            state = state + rng.standard_normal(3) * kick[f] * 0.45
 
         frame_end.append(len(pts))
 
