@@ -29,6 +29,36 @@ SCHEMA_VERSION = "1.0"
 
 
 # --------------------------------------------------------------------------- #
+# Real-time atomic unit: the instantaneous semantics at one analysis hop.
+# A live tagger emits a stream of these; the renderer consumes them frame by
+# frame. A SemanticProfile (below) is just a recording of such a stream.
+# --------------------------------------------------------------------------- #
+@dataclass
+class SemanticFrame:
+    t: float                     # timestamp (seconds, causal)
+    # instantaneous per-frame signals, causally normalized to 0..1
+    energy: float
+    brightness: float
+    flux: float
+    onset: float
+    flatness: float              # 0..1 noisiness (tonal <-> noisy)
+    bands: list[float]           # per-band energy (0..1), bass..treble
+    chroma: list[float]          # 12-dim pitch classes, L1-normalized
+    # running (causal) semantic estimates
+    tempo_bpm: float
+    key: str
+    mode: str                    # "major" | "minor"
+    valence: float               # 0..1
+    arousal: float               # 0..1
+    # events fired this frame
+    beat: bool = False
+    section_change: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+# --------------------------------------------------------------------------- #
 # Track-level semantic tags (grouped, interpretable)
 # --------------------------------------------------------------------------- #
 @dataclass

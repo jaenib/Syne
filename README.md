@@ -1,39 +1,47 @@
 # Syne
 
-**Semantic music tagging pipeline** — turns an audio file into structured,
-interpretable semantic information, designed as a stable contract for a future
-renderer that morphs abstract geometry in sync with the music.
-
-Inspired by [SAMAT](https://github.com/andreaspatakis/samat) (*Semantic-Aware
-Interpretable Multimodal Music Auto-Tagging*): every feature belongs to a named
-perceptual group, and every tag is explainable in terms of its inputs. Where
-SAMAT trains models on large datasets, Syne ships a transparent DSP-heuristic
-tagger that runs offline out of the box — behind a pluggable interface so a
-learned model can drop in later.
-
-The included renderer maps those tags onto a **morphing Lorenz attractor** — the
-chaos "butterfly" — so the geometry breathes with the music:
+**Real-time semantic music visualizer.** A streaming tagger turns live audio
+into a stream of semantic frames, and a renderer maps those onto a **morphing
+Lorenz attractor** — the chaos "butterfly" — so the geometry breathes with the
+music:
 
 ![Lorenz attractor morphing to music](docs/lorenz_demo.gif)
 
+The spine is **interface → tagger → renderer**:
+
 ```
-audio file ──▶ load ──▶ feature groups ──▶ tagger ──▶ SemanticProfile ──▶ morph drivers ──▶ (renderer)
-                         rhythm/tonal/         │            (JSON contract)        │
-                         timbre/dynamics/       │                                   └─ static + per-frame channels
-                         structure              └─ track tags + timelines
+audio blocks ─▶ StreamingTagger.push() ─▶ SemanticFrame stream ─▶ renderer
+   (mic /        (causal, no look-ahead)      (the contract)      (Lorenz curves)
+    playback)     mock now ⇄ model later
 ```
 
-## Why two layers
+Inspired by [SAMAT](https://github.com/andreaspatakis/samat) (*Semantic-Aware
+Interpretable Multimodal Music Auto-Tagging*): every tag is explainable in terms
+of its inputs. The shipped tagger is a transparent **heuristic mock** behind the
+`StreamingTagger` interface — a data-driven model later implements the same
+`push(samples) -> [SemanticFrame]` and nothing downstream changes.
 
-The semantic output is split so a renderer can both *set a scene* and *animate
-it*:
+## Real-time by design
 
-- **Track-level tags** — global, grouped descriptors (tempo, key/mode, mood as
-  valence/arousal, energy, timbre, genre hints).
-- **Timelines** — per-frame signals on a shared time grid (energy, brightness,
-  spectral flux, onset strength, 12-D chroma, bass/mid/treble band energies)
-  plus beat times and section boundaries — so geometry can morph *with* the
-  music, not just react to one global mood.
+The atomic unit is a **`SemanticFrame`** — the instantaneous semantics at one
+hop (energy, brightness, flux, onset, flatness, bass/mid/treble bands, 12-D
+chroma, running tempo/key/mode, valence/arousal, beat & section events). The
+tagger emits one per hop using **only past samples**. Verified properties:
+
+- **causal** — a prefix of audio yields exactly the prefix of frames from the
+  full run (no future dependence);
+- **block-size invariant** — same frames whether fed one block or many;
+- **~25× real-time** — ≈0.95 ms compute per hop against a 23 ms hop budget.
+
+A whole-track **`SemanticProfile`** (track tags + timelines) is simply a
+*recording* of a frame stream, kept for offline analysis and the GIF test
+harness — so the offline path exercises the real real-time code, not a parallel
+batch implementation.
+
+```bash
+# emit the live SemanticFrame contract as JSONL (‑‑rate paces at real time)
+syne stream track.wav
+```
 
 ## Install
 
@@ -208,53 +216,53 @@ needs the optional Pillow dependency: `pip install -e ".[render]"`.
 
 ```
 syne/
+  stream.py           # REAL-TIME core: AdaptiveNormalizer, StreamingFeatureExtractor,
+                      #   StreamingTagger protocol + HeuristicStreamingTagger (the mock)
   audio.py            # load & downmix to mono float32
-  features/           # interpretable feature groups (STFT computed once, shared)
-    rhythm.py         #   tempo, beats, pulse clarity, regularity, swing
-    tonal.py          #   chroma, key/mode (Krumhansl-Schmuckler)
-    timbre.py         #   spectral shape, MFCC, brightness/warmth/roughness
-    dynamics.py       #   RMS energy, loudness, dynamic range
-    structure.py      #   spectral flux, section boundaries
   tagging/
-    base.py           # Tagger interface (pluggable)
-    heuristic.py      # default DSP-heuristic tagger
-    vocab.py          # interpretable label vocabularies + rules
-  semantics/schema.py # SemanticProfile dataclasses = the JSON contract
+    __init__.py       # exports the StreamingTagger interface + heuristic mock
+    vocab.py          # interpretable label vocabularies (used when aggregating)
+  pipeline.py         # drive the streaming tagger, aggregate frames -> profile
+  semantics/schema.py # SemanticFrame (live) + SemanticProfile (recording) = contract
   morph/drivers.py    # SemanticProfile -> generic renderer control channels
   render/
     lorenz.py         # connectors: tags -> Lorenz params, RK4 integrator, band curves
     raster.py         # Trajectory(s) -> GIF (long-exposure, color-preserving, occlusion)
-  pipeline.py         # orchestration: file -> SemanticProfile
-  cli.py              # `syne analyze` / `syne render`
+  cli.py              # `syne stream` / `syne analyze` / `syne render`
 web/                  # interactive, audio-synced WebGL viewer (Three.js)
 ```
 
-## Extending with a learned tagger
+## Swapping the mock for a data-driven tagger
 
-Implement the `Tagger` protocol and pass it to the pipeline — everything
-downstream (timelines, contract, drivers) is unchanged:
+Implement the `StreamingTagger` protocol — `push(samples) -> [SemanticFrame]`
+plus `reset()` — and the rest of the system (aggregation, contract, renderer)
+is unchanged:
 
 ```python
-from syne.pipeline import analyze_clip
-from syne.audio import load_audio
+from syne.stream import StreamingTagger   # Protocol
+from syne.semantics import SemanticFrame
 
-class MyModelTagger:
+class MyModelTagger:                       # e.g. wrap an MTG-Jamendo model
     name = "my-model"
-    def tag(self, features):     # -> TrackTags
+    sample_rate = 22050
+    hop_length = 512
+    def reset(self): ...
+    def push(self, samples):               # -> list[SemanticFrame]
         ...
 
-profile = analyze_clip(load_audio("track.wav"), tagger=MyModelTagger())
+# feed live audio blocks, or use the offline aggregator:
+#   profile = analyze_clip(clip, tagger=MyModelTagger())
 ```
 
 ## Roadmap
 
+- [x] Streaming, causal tagger (real-time core) behind a swappable interface.
 - [x] Renderer turning the semantic info into morphing geometry (Lorenz butterfly).
-- [x] Audio-synced interactive WebGL viewer.
-- [x] Harmonic color (full chroma) + per-frame saturation.
-- [x] Multiple curves (one per frequency band) to surface the spectrum.
-- [ ] Port multi-curve band rendering to the web viewer.
-- [ ] Optional deep-learning tagger adapter (e.g. MTG-Jamendo tags).
-- [ ] Beat-synchronous timelines for tighter visual sync.
+- [x] Harmonic color (full chroma) + per-frame saturation; multi-band curves.
+- [ ] Port the web viewer to consume the live `SemanticFrame` stream (WebSocket)
+      with the multi-curve band mapping.
+- [ ] Microphone / system-audio capture front-end.
+- [ ] Data-driven tagger adapter (e.g. MTG-Jamendo) implementing `StreamingTagger`.
 
 ## Tests
 

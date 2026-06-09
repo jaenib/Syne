@@ -36,6 +36,38 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_stream(args: argparse.Namespace) -> int:
+    """Run the streaming tagger and emit the live SemanticFrame contract (JSONL).
+
+    This is the real-time tagger output the renderer consumes. Reads a file in
+    hop-sized blocks (the same path live audio would take); ``--rate`` paces it
+    at wall-clock to simulate real time.
+    """
+    import json
+    import time
+
+    from syne.audio import load_audio
+    from syne.stream import HeuristicStreamingTagger
+
+    clip = load_audio(args.input)
+    tagger = HeuristicStreamingTagger(clip.sample_rate, hop_length=clip.hop_length)
+    tagger.reset()
+    hop = clip.hop_length
+    out = open(args.output, "w", encoding="utf-8") if args.output else sys.stdout
+
+    n = 0
+    for i in range(0, len(clip.samples), hop):
+        for frame in tagger.push(clip.samples[i:i + hop]):
+            out.write(json.dumps(frame.to_dict()) + "\n")
+            n += 1
+            if args.rate:
+                time.sleep(clip.hop_seconds)
+    if args.output:
+        out.close()
+        print(f"wrote {n} semantic frames -> {args.output}", file=sys.stderr)
+    return 0
+
+
 def _cmd_render(args: argparse.Namespace) -> int:
     from syne.pipeline import analyze_file
     from syne.render.lorenz import build_band_trajectories, build_control, integrate
@@ -128,6 +160,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     analyze.add_argument("--summary", action="store_true", help="print a summary")
     analyze.set_defaults(func=_cmd_analyze)
+
+    stream = sub.add_parser(
+        "stream", help="run the streaming tagger and emit SemanticFrames (JSONL)"
+    )
+    stream.add_argument("input", help="audio file to stream through the tagger")
+    stream.add_argument("-o", "--output", help="write JSONL here (default: stdout)")
+    stream.add_argument("--rate", action="store_true",
+                        help="pace output at real time (sleep one hop per frame)")
+    stream.set_defaults(func=_cmd_stream)
 
     render = sub.add_parser(
         "render", help="render a morphing Lorenz attractor from the music"

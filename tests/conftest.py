@@ -19,9 +19,11 @@ def _synth_track(seconds: float = 8.0, bpm: float = 120.0, sr: int = SR) -> np.n
     n = int(seconds * sr)
     t = np.arange(n) / sr
 
-    # C major triad: C4, E4, G4
-    chord = sum(np.sin(2 * np.pi * f * t) for f in (261.63, 329.63, 392.0))
-    chord /= 3.0
+    # C major chord with a strong bass root (C2) so the key is unambiguous,
+    # the way real music has a root in the low end: C2, C3, C4, E4, G4.
+    voices = [(65.41, 1.6), (130.81, 1.2), (261.63, 1.0), (329.63, 0.8), (392.0, 0.8)]
+    chord = sum(a * np.sin(2 * np.pi * f * t) for f, a in voices)
+    chord /= sum(a for _, a in voices)
 
     # amplitude envelope pulsing at the beat rate
     beat_hz = bpm / 60.0
