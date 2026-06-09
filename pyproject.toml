@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "syne"
+version = "0.1.0"
+description = "Semantic music tagging pipeline that emits a renderer-ready morph contract."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Syne" }]
+dependencies = [
+    "librosa>=0.10",
+    "numpy>=1.23",
+    "soundfile>=0.12",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+syne = "syne.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["syne*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

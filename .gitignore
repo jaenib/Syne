@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+
+# Generated outputs
+*.semantic.json
+*.drivers.json
+!examples/*.json
+
+# Audio scratch
+audio/
+*.wav
+*.flac
+*.mp3
+*.ogg
+*.m4a
